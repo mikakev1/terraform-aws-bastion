@@ -1,3 +1,17 @@
+# AWS ECR Terraform module
+
+[logo]: _docs/terraformawsbastion.png "scheme"
+
+This module aims to create resilient bastions.
+
+ This module creates for each bastion creates:
+
+- An EC2 instance for the bastion with an auto scaling group
+
+- A Network loadbalancer load balancer attached to the bastion
+
+- many of security groups
+
 ## Inputs
 
 | Name | Description | Type | Default | Required |
@@ -38,3 +52,30 @@
 | elb\_ip |  |
 | private\_instances\_security\_group |  |
 
+## Usage
+
+`````
+module "sample"
+  environment                = "stage"
+  auto_scaling_group_subnets = ["subnet-09431a12fc6xxxxx","subnet-09431a12fc6yyyyy"]
+  region                     = "eu-west-3"
+  bastion_host_key_pair      = "my-keypair"
+  bastion_instance_count     = "1"
+  bucket_name                = "mybucket-bastion-logs"
+  bucket_force_destroy       = true
+  cidrs                      = "10.0.0.0/16"
+  elb_subnets                = ["subnet-09431a12fc6wwwwww","subnet-09431a12fc6zzzzz"]
+  is_lb_private              = "false"
+  log_expiry_days            = "90"
+  log_glacier_days           = "60"
+  log_standard_ia_days       = "10"
+  private_ssh_port           = "22"
+  public_ssh_port            = "2"
+  vpc_id                     = "vpc-08543dc6bb8b6xxxx"
+
+  tags = {
+    Name        = stage-bastion"
+    Environment = "stage"
+  }
+
+`````
