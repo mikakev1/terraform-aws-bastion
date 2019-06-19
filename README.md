@@ -1,6 +1,6 @@
 # AWS ECR Terraform module
 
-[logo]: _docs/terraformawsbastion.png "scheme"
+![alt text](_docs/diagram.png)
 
 This module aims to create resilient bastions.
 
