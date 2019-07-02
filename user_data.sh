@@ -1,36 +1,65 @@
-#!/bin/bash -x
+#!/usr/bin/env bash 
+set -x
 yum -y update --security
+##########################
+##    INPUTS / CONFIG   ##
+##########################
+
+declare -r BASTION_LOGDIR=/var/log/bastion
+declare -r EC2_USER="ec2-user"
+# TODO should be EC2 GROUP
+declare -r EC2_GROUP="ec2-user"
+
+
+function setup_logdir() {
+  # Create a new folder for the log files
+  [ -d "${BASTION_LOGDIR}" ] || mkdir "${BASTION_LOGDIR}"
+
+  # Allow ec2-user only to access this folder and its content
+  chown ${EC2_USER}:${EC2_GROUP} "${BASTION_LOGDIR}"
+  chmod -R 770 "${BASTION_LOGDIR}"
+  setfacl -Rdm other:0 "${BASTION_LOGDIR}"
+}
+
+function newscript() {
+  set -r script_name=${1}
+  echo "#/usr/bin/env bash" > "${script_name}"
+  echo "LOG_DIR="${BASTION_LOGDIR}" > ${script_name}"
+  chmod 700 "${script_name}"
+}
+
 
 ##########################
 ## ENABLE SSH RECORDING ##
 ##########################
 
-# Create a new folder for the log files
-mkdir /var/log/bastion
-
-# Allow ec2-user only to access this folder and its content
-chown ec2-user:ec2-user /var/log/bastion
-chmod -R 770 /var/log/bastion
-setfacl -Rdm other:0 /var/log/bastion
+# Setup bastion's log sink
+setup_logdir
 
 # Make OpenSSH execute a custom script on logins
-echo -e "\\nForceCommand /usr/bin/bastion/shell" >> /etc/ssh/sshd_config
+# TODO : Should ensure that SSH key is only used for login and restrict to command usage on client too
+(echo; echo "ForceCommand /usr/bin/bastion/shell") >> /etc/ssh/sshd_config
+
 
 # Block some SSH features that bastion host users could use to circumvent the solution
-awk '!/X11Forwarding/' /etc/ssh/sshd_config > temp && mv temp /etc/ssh/sshd_config
+
+TEMP_SSHCONFIG=$(mktemp)
+
+grep -vi "X11Forwarding" /etc/ssh/sshd_config > ${TEMP_SSHCONFIG} && mv ${TEMP_SSHCONFIG} /etc/ssh/sshd_config
 echo "X11Forwarding no" >> /etc/ssh/sshd_config
 
-mkdir /usr/bin/bastion
+[ -d "/usr/bin/bastion" ] || mkdir /usr/bin/bastion
 
-cat > /usr/bin/bastion/shell << 'EOF'
+newscript /usr/bin/bastion/shell
+cat >> /usr/bin/bastion/shell << 'EOF'
 
 # Check that the SSH client did not supply a command
-if [[ -z $SSH_ORIGINAL_COMMAND ]]; then
+if [[ -z "${SSH_ORIGINAL_COMMAND}" ]]; then
 
   # The format of log files is /var/log/bastion/YYYY-MM-DD_HH-MM-SS_user
-  LOG_FILE="`date --date="today" "+%Y-%m-%d_%H-%M-%S"`_`whoami`"
-  LOG_DIR="/var/log/bastion/"
-
+  LOG_FILE="$(date --date="today" "+%Y-%m-%d_%H-%M-%S")_$(whoami)"
+  # HERE-DOC should use global variable anytime unless...
+  
   # Print a welcome message
   echo ""
   echo "NOTE: This SSH session will be recorded"
@@ -63,14 +92,14 @@ chmod a+x /usr/bin/bastion/shell
 # 1. Add a random suffix to the log file name.
 # 2. Prevent bastion host users from listing the folder containing log files. This is done
 #    by changing the group owner of "script" and setting GID.
-chown root:ec2-user /usr/bin/script
+chown root:${EC2_GROUP} /usr/bin/script
 chmod g+s /usr/bin/script
 
 # 3. Prevent bastion host users from viewing processes owned by other users, because the log
 #    file name is one of the "script" execution parameters.
-mount -o remount,rw,hidepid=2 /proc
 awk '!/proc/' /etc/fstab > temp && mv temp /etc/fstab
 echo "proc /proc proc defaults,hidepid=2 0 0" >> /etc/fstab
+mount -o remount /proc
 
 # Restart the SSH service to apply /etc/ssh/sshd_config modifications.
 service sshd restart
@@ -78,18 +107,15 @@ service sshd restart
 ############################
 ## EXPORT LOG FILES TO S3 ##
 ############################
+newscript /usr/bin/bastion/sync_s3
 
-cat > /usr/bin/bastion/sync_s3 << 'EOF'
-#!/usr/bin/env bash
-
+cat >> /usr/bin/bastion/sync_s3 << 'EOF'
 # Copy log files to S3 with server-side encryption enabled.
 # Then, if successful, delete log files that are older than a day.
-LOG_DIR="/var/log/bastion/"
+
 aws s3 cp $LOG_DIR s3://${bucket_name}/logs/ --sse --region ${aws_region} --recursive && find $LOG_DIR* -mtime +1 -exec rm {} \;
 
 EOF
-
-chmod 700 /usr/bin/bastion/sync_s3
 
 #######################################
 ## SYNCHRONIZE USERS AND PUBLIC KEYS ##
@@ -100,11 +126,10 @@ chmod 700 /usr/bin/bastion/sync_s3
 # This script retrieves the public keys, creates or deletes local user accounts as needed,
 # and copies the public key to /home/username/.ssh/authorized_keys
 
-cat > /usr/bin/bastion/sync_users << 'EOF'
-#!/usr/bin/env bash
-
+newscript /usr/bin/bastion/sync_users
+cat >> /usr/bin/bastion/sync_users << 'EOF'
 # The file will log user changes
-LOG_FILE="/var/log/bastion/users_changelog.txt"
+LOG_FILE="${LOG_DIR}/users_changelog.txt"
 
 # The function returns the user name from the public key file name.
 # Example: public-keys/sshuser.pub => sshuser
@@ -158,16 +183,16 @@ fi
 
 EOF
 
-chmod 700 /usr/bin/bastion/sync_users
-
 ###########################################
 ## SCHEDULE SCRIPTS AND SECURITY UPDATES ##
 ###########################################
 
-cat > ~/mycron << EOF
+CRONFILE=${mktemp}
+
+cat > ${CRONFILE} << EOF
 */5 * * * * /usr/bin/bastion/sync_s3
 */5 * * * * /usr/bin/bastion/sync_users
 0 0 * * * yum -y update --security
 EOF
-crontab ~/mycron
-rm ~/mycron
+crontab ${CRONFILE}
+rm ${CRONFILE}
